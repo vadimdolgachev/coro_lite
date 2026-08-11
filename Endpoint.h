@@ -2,8 +2,8 @@
 // Created by vadim on 29.01.2026.
 //
 
-#ifndef PROXY_OVER_SSH_ENDPOINT_H
-#define PROXY_OVER_SSH_ENDPOINT_H
+#ifndef CORO_LITE_ENDPOINT_H
+#define CORO_LITE_ENDPOINT_H
 
 #include <cstddef>
 #include <cstring>
@@ -84,4 +84,4 @@ struct std::hash<CoroLite::Endpoint> {
     size_t operator()(const CoroLite::Endpoint &endpoint) const noexcept;
 };
 
-#endif //PROXY_OVER_SSH_ENDPOINT_H
+#endif //CORO_LITE_ENDPOINT_H

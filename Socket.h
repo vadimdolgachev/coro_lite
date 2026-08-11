@@ -2,8 +2,8 @@
 // Created by vadim on 28.01.2026.
 //
 
-#ifndef PROXY_OVER_SSH_SOCKET_H
-#define PROXY_OVER_SSH_SOCKET_H
+#ifndef CORO_LITE_SOCKET_H
+#define CORO_LITE_SOCKET_H
 
 #include "CoroTask.h"
 #include "Endpoint.h"
@@ -139,4 +139,4 @@ namespace CoroLite {
     };
 } // namespace CoroLite
 
-#endif // PROXY_OVER_SSH_SOCKET_H
+#endif // CORO_LITE_SOCKET_H

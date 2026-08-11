@@ -1,5 +1,5 @@
-#ifndef PROXY_OVER_SSH_FDUTILS_H
-#define PROXY_OVER_SSH_FDUTILS_H
+#ifndef CORO_LITE_FDUTILS_H
+#define CORO_LITE_FDUTILS_H
 
 #include <unistd.h>
 #include <utility>
@@ -61,4 +61,4 @@ namespace CoroLite {
 
     using UniqueFd = UniqueFdBasic<>;
 } // namespace CoroLite
-#endif // PROXY_OVER_SSH_FDUTILS_H
+#endif // CORO_LITE_FDUTILS_H

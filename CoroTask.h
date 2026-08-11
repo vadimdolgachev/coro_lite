@@ -1,5 +1,5 @@
-#ifndef PROXY_OVER_SSH_COROTASK_H
-#define PROXY_OVER_SSH_COROTASK_H
+#ifndef CORO_LITE_COROTASK_H
+#define CORO_LITE_COROTASK_H
 
 #include <algorithm>
 #include <atomic>
@@ -385,4 +385,4 @@ namespace CoroLite {
     };
 } // namespace CoroLite
 
-#endif // PROXY_OVER_SSH_COROTASK_H
+#endif // CORO_LITE_COROTASK_H

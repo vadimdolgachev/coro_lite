@@ -1,5 +1,5 @@
-#ifndef TIMER_H
-#define TIMER_H
+#ifndef CORO_LITE_TIMER_H
+#define CORO_LITE_TIMER_H
 
 #include <cerrno>
 #include <chrono>
@@ -50,4 +50,4 @@ namespace CoroLite {
 
 // NOLINTEND(readability-make-member-function-const)
 
-#endif // TIMER_H
+#endif // CORO_LITE_TIMER_H

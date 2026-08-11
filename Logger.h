@@ -1,5 +1,5 @@
-#ifndef PROXY_OVER_SSH_LOGGER_H
-#define PROXY_OVER_SSH_LOGGER_H
+#ifndef CORO_LITE_LOGGER_H
+#define CORO_LITE_LOGGER_H
 
 #include <format>
 #include <iostream>
@@ -71,4 +71,4 @@ namespace CoroLite {
 
 #endif
 
-#endif //PROXY_OVER_SSH_LOGGER_H
+#endif //CORO_LITE_LOGGER_H

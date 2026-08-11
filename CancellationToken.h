@@ -2,8 +2,8 @@
 // Created by vadim on 18.04.2026.
 //
 
-#ifndef PROXY_OVER_SSH_CANCELLATIONTOKEN_H
-#define PROXY_OVER_SSH_CANCELLATIONTOKEN_H
+#ifndef CORO_LITE_CANCELLATIONTOKEN_H
+#define CORO_LITE_CANCELLATIONTOKEN_H
 
 #include <atomic>
 #include <exception>
@@ -64,4 +64,4 @@ namespace CoroLite {
     };
 } // namespace CoroLite
 
-#endif // PROXY_OVER_SSH_CANCELLATIONTOKEN_H
+#endif // CORO_LITE_CANCELLATIONTOKEN_H

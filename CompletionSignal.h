@@ -1,5 +1,5 @@
-#ifndef PROXY_OVER_SSH_COMPLETIONSIGNAL_H
-#define PROXY_OVER_SSH_COMPLETIONSIGNAL_H
+#ifndef CORO_LITE_COMPLETIONSIGNAL_H
+#define CORO_LITE_COMPLETIONSIGNAL_H
 
 #include <cstdint>
 
@@ -38,4 +38,4 @@ namespace CoroLite {
 
 // NOLINTEND(readability-make-member-function-const)
 
-#endif // PROXY_OVER_SSH_COMPLETIONSIGNAL_H
+#endif // CORO_LITE_COMPLETIONSIGNAL_H
