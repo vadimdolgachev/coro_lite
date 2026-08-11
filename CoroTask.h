@@ -23,8 +23,6 @@
 
 #include "CancellationToken.h"
 #include "CompletionSignal.h"
-#include "FdUtils.h"
-#include "Logger.h"
 #include "Timer.h"
 
 namespace CoroLite {
