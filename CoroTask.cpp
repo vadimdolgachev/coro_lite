@@ -74,8 +74,8 @@ namespace CoroLite {
             throw std::runtime_error("Failed to register wakeup fd with epoll");
         }
 
-        threadPool = std::make_unique<ThreadPool>(*this, CoroLite::Consts::THREAD_POOL_SIZE);
-        pendingResumes.reserve(16);
+        threadPool = std::make_unique<ThreadPool>(*this, Consts::THREAD_POOL_SIZE);
+        pendingResumes.reserve(Consts::EPOLL_BATCH_SIZE);
     }
 
     EpollScheduler::~EpollScheduler() {
@@ -190,12 +190,12 @@ namespace CoroLite {
     }
 
     void EpollScheduler::run() {
-        std::array<epoll_event, CoroLite::Consts::EPOLL_BATCH_SIZE> events = {};
+        std::array<epoll_event, Consts::EPOLL_BATCH_SIZE> events = {};
         const auto cancellationToken = getCancellationTokenSource().getToken();
 
         while (!cancellationToken.isStopped()) {
             if (const int size = epoll_wait(epollFd.get(), events.data(), events.size(),
-                                            CoroLite::Consts::EPOLL_TIMEOUT_MS);
+                                            Consts::EPOLL_TIMEOUT_MS);
                 size > 0) {
                 pendingResumes.clear(); {
                     std::lock_guard lock(schedulerMutex);
