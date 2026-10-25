@@ -1,18 +1,34 @@
 #ifndef CORO_LITE_LOGGER_H
 #define CORO_LITE_LOGGER_H
 
+#include <chrono>
 #include <format>
 #include <iostream>
 #include <sstream>
+#include <string>
 #include <thread>
+#include <utility>
 
-constexpr bool PRINT_VERBOSE_LOG = true;
+#ifndef CORO_LITE_VERBOSE_LOG
+#ifdef NDEBUG
+#define CORO_LITE_VERBOSE_LOG 0
+#else
+#define CORO_LITE_VERBOSE_LOG 1
+#endif
+#endif
+
+#ifndef CORO_LITE_LOG_TAG
+#define CORO_LITE_LOG_TAG "CoroLite"
+#endif
 
 
-inline std::string threadId() {
-    std::ostringstream os;
-    os << std::this_thread::get_id();
-    return os.str();
+inline const std::string &threadId() {
+    thread_local const std::string id = [] {
+        std::ostringstream os;
+        os << std::this_thread::get_id();
+        return os.str();
+    }();
+    return id;
 }
 
 #ifdef __ANDROID__
@@ -20,23 +36,23 @@ inline std::string threadId() {
 
 namespace CoroLite {
     template<typename... Args>
-    void log_d(std::format_string<Args...> fmt, Args &&... args) {
+    void log_d(std::format_string<Args...> fmt, Args &&...args) {
         auto msg = std::format("[{}] {}", threadId(), std::format(fmt, std::forward<Args>(args)...));
-        __android_log_print(ANDROID_LOG_DEBUG, "SSHProxy", "%s", msg.c_str());
+        __android_log_print(ANDROID_LOG_DEBUG, CORO_LITE_LOG_TAG, "%s", msg.c_str());
     }
 
     template<typename... Args>
-    void log_v(std::format_string<Args...> fmt, Args &&... args) {
-        if constexpr (PRINT_VERBOSE_LOG) {
+    void log_v(std::format_string<Args...> fmt, Args &&...args) {
+        if constexpr (CORO_LITE_VERBOSE_LOG != 0) {
             auto msg = std::format("[{}] {}", threadId(), std::format(fmt, std::forward<Args>(args)...));
-            __android_log_print(ANDROID_LOG_VERBOSE, "SSHProxy", "%s", msg.c_str());
+            __android_log_print(ANDROID_LOG_VERBOSE, CORO_LITE_LOG_TAG, "%s", msg.c_str());
         }
     }
 
     template<typename... Args>
-    void log_e(std::format_string<Args...> fmt, Args &&... args) {
+    void log_e(std::format_string<Args...> fmt, Args &&...args) {
         auto msg = std::format("[{}] {}", threadId(), std::format(fmt, std::forward<Args>(args)...));
-        __android_log_print(ANDROID_LOG_ERROR, "SSHProxy", "%s", msg.c_str());
+        __android_log_print(ANDROID_LOG_ERROR, CORO_LITE_LOG_TAG, "%s", msg.c_str());
     }
 } // namespace CoroLite
 
@@ -46,29 +62,27 @@ namespace CoroLite {
 
 namespace CoroLite {
     template<typename... Args>
-    void log_d(std::format_string<Args...> fmt, Args &&... args) {
+    void log_d(std::format_string<Args...> fmt, Args &&...args) {
         std::osyncstream(std::cout) << std::format("{} [{}] {}",
                                                    floor<std::chrono::milliseconds>(std::chrono::system_clock::now()),
-                                                   threadId(),
-                                                   std::format(fmt, std::forward<Args>(args)...));
+                                                   threadId(), std::format(fmt, std::forward<Args>(args)...));
     }
 
     template<typename... Args>
-    void log_v(std::format_string<Args...> fmt, Args &&... args) {
-        if constexpr (PRINT_VERBOSE_LOG) {
+    void log_v(std::format_string<Args...> fmt, Args &&...args) {
+        if constexpr (CORO_LITE_VERBOSE_LOG != 0) {
             log_d(fmt, std::forward<Args>(args)...);
         }
     }
 
     template<typename... Args>
-    void log_e(std::format_string<Args...> fmt, Args &&... args) {
-        std::osyncstream(std::cout) << std::format("{} [{}] {}",
+    void log_e(std::format_string<Args...> fmt, Args &&...args) {
+        std::osyncstream(std::cerr) << std::format("{} [{}] {}",
                                                    floor<std::chrono::milliseconds>(std::chrono::system_clock::now()),
-                                                   threadId(),
-                                                   std::format(fmt, std::forward<Args>(args)...));
+                                                   threadId(), std::format(fmt, std::forward<Args>(args)...));
     }
 } // namespace CoroLite
 
 #endif
 
-#endif //CORO_LITE_LOGGER_H
+#endif // CORO_LITE_LOGGER_H

@@ -9,33 +9,34 @@
 #include "Endpoint.h"
 
 #include <memory>
+#include <mutex>
 #include <span>
 
 namespace CoroLite {
+    class Socket;
     struct AcceptedSocket;
 
     struct ListenSocketAwaiter final : SchedulerAware<EpollScheduler> {
         ListenSocketAwaiter(int fd_, CancellationToken cancellationToken_);
+        ListenSocketAwaiter(const Socket &socket_, CancellationToken cancellationToken_);
 
-        [[nodiscard]] bool await_ready() const noexcept;
+        [[nodiscard]] static bool await_ready() noexcept;
 
         void await_suspend(std::coroutine_handle<> h);
 
-        [[nodiscard]] AcceptedSocket await_resume();
+        [[nodiscard]] AcceptedSocket await_resume() const;
 
     private:
         int fd;
+        const Socket *owner = nullptr;
         CancellationToken cancellationToken;
         std::coroutine_handle<> handle;
     };
 
-    class Socket;
     using SocketPtr = std::shared_ptr<Socket>;
 
     struct ReadSocketAwaiter final : SchedulerAware<EpollScheduler> {
-        ReadSocketAwaiter(SocketPtr socket_,
-                          std::span<unsigned char> buffer_,
-                          CancellationTokenOpt cancellationToken_);
+        ReadSocketAwaiter(SocketPtr socket_, std::span<unsigned char> buffer_, CancellationTokenOpt cancellationToken_);
 
         bool await_ready() const noexcept;
 
@@ -61,7 +62,7 @@ namespace CoroLite {
 
         void await_suspend(std::coroutine_handle<> h);
 
-        size_t await_resume();
+        size_t await_resume() const;
 
     private:
         SocketPtr socket;
@@ -74,15 +75,13 @@ namespace CoroLite {
     };
 
     struct ConnectSocketAwaiter final : SchedulerAware<EpollScheduler> {
-        ConnectSocketAwaiter(SocketPtr socket_,
-                             Endpoint endpoint_,
-                             CancellationTokenOpt cancellationToken_);
+        ConnectSocketAwaiter(SocketPtr socket_, Endpoint endpoint_, CancellationTokenOpt cancellationToken_);
 
         bool await_ready() const noexcept;
 
         void await_suspend(std::coroutine_handle<> h);
 
-        void await_resume();
+        void await_resume() const;
 
     private:
         SocketPtr socket;
@@ -103,15 +102,17 @@ namespace CoroLite {
 
         Socket &operator=(const Socket &) = delete;
 
-        Socket(Socket &&) = default;
+        Socket(Socket &&) = delete;
 
-        Socket &operator=(Socket &&) = default;
+        Socket &operator=(Socket &&) = delete;
 
         ~Socket();
 
-        void setReusePort(bool reusePort);
+        void setReusePort(bool reusePort) const;
 
-        void setReuseAddr(bool reuseAddr);
+        void setReuseAddr(bool reuseAddr) const;
+
+        void setScheduler(const EpollScheduler *scheduler) const noexcept;
 
         void close() noexcept;
 
@@ -123,14 +124,16 @@ namespace CoroLite {
 
         [[nodiscard]] ListenSocketAwaiter listen(CancellationToken ct) const;
 
-        [[nodiscard]] ReadSocketAwaiter read(std::span<unsigned char> buffer, CancellationTokenOpt ct);
+        [[nodiscard]] CoroTask<size_t> read(std::span<unsigned char> buffer, CancellationTokenOpt ct);
 
-        [[nodiscard]] WriteSocketAwaiter write(std::span<unsigned char> buffer, CancellationTokenOpt ct);
+        [[nodiscard]] CoroTask<size_t> write(std::span<unsigned char> buffer, CancellationTokenOpt ct);
 
         [[nodiscard]] bool isEof() const noexcept;
 
     private:
         UniqueFd fd_;
+        mutable std::mutex registryMutex;
+        mutable std::weak_ptr<FdRegistry> registry;
     };
 
     struct AcceptedSocket final {

@@ -43,6 +43,11 @@ int main() {
 ```
 
 Call `CancellationTokenSource::requestStop()` to wake the scheduler and begin shutdown.
+`run()` is single-use. Destroying a scheduler on another thread requests cancellation and waits for
+`run()` and its workers to finish. Destruction from one of its own workers is a contract violation
+and terminates the process. User code resumed on workers must cooperate with cancellation and return.
+The caller remains responsible for joining its own thread after destruction returns.
+
 A `CoroTask` is single-use: move it into `co_await`, or call exactly one of `start()` and `startDetached()`.
 
 ## Components
@@ -54,6 +59,32 @@ A `CoroTask` is single-use: move it into `co_await`, or call exactly one of `sta
 - `TimerAwaiter` provides cancellable delays; `Endpoint` represents IP addresses and hostnames.
 - `UniqueFd` provides move-only file-descriptor ownership.
 
+## Socket and Timer Lifetimes
+
+`Socket::read()` and `write()` return `CoroTask<size_t>`; existing `co_await socket->read(...)`
+and `co_await socket->write(...)` calls retain their syntax. They keep the socket alive and retry
+`EAGAIN` by awaiting readiness again. Cancellation and other errors propagate to the caller.
+The low-level socket awaiters still represent one I/O attempt.
+
+Sockets keep a weak reference to fd registrations and may outlive the scheduler. Cancel and finish
+outstanding operations before explicitly closing a socket; concurrent close and I/O on the same socket
+are not supported. Direct registrations made with `add()` remain the caller's responsibility.
+`addAwaiter()` atomically registers an operation and its optional cancellation fd, with rollback on error.
+
+`TimerAwaiter` leases timerfds from the scheduler, caching up to 64 idle timers. Zero delays complete
+immediately without a timerfd; negative delays throw `invalid_argument`. Cancelled leases are disarmed
+and drained before reuse. `Timer::arm()`/`armSec()` can throw `system_error` and are no longer `noexcept`;
+`Timer::arm(0ns)` explicitly disarms a standalone timer. Cancellation readiness remains set after stop,
+so one waiter cannot consume another waiter's notification.
+
+## Logging
+
+`CORO_LITE_VERBOSE_LOG` accepts `AUTO` (default: Debug on, other configurations off), `ON`, or `OFF`.
+`CORO_LITE_LOG_TAG` defaults to `CoroLite` on Android. These CMake definitions propagate to consumers
+so inline logging functions use the same configuration. Applications can set the tag before
+`add_subdirectory()`. Errors go to stderr on Linux; Android uses the corresponding Logcat priorities.
+Thread IDs are cached per thread.
+
 ## Build and Test
 
 ```bash
@@ -62,5 +93,12 @@ cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
-For an AddressSanitizer build, add `-DSANITIZER=address` during configuration. Tests currently cover coroutine ownership,
-single-consumption rules, detached cleanup, nested suspension, and cancellation-driven scheduler shutdown.
+For sanitizers, add `-DSANITIZER=address` or `-DSANITIZER=thread`. Use Debug to enable runtime assertions; the new regression checks also remain active with `NDEBUG`.
+The seven CTest cases cover coroutine ownership, cancellation isolation, socket lifetimes and I/O retries,
+concurrent scheduler destruction, FIFO execution, deferred readiness, timer reuse and cleanup, syscall
+failures, and logging with verbose enabled and disabled. Regression tests use Linux linker wrappers;
+production code has no syscall-injection hooks.
+
+Coroutine protocol hooks intentionally remain instance members. IDE suggestions to make stateless
+hooks static conflict with clang-tidy diagnostics for the compiler-generated instance calls; these
+style suggestions do not indicate a runtime error.

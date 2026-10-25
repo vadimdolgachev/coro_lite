@@ -55,7 +55,7 @@ namespace CoroLite {
 
         [[nodiscard]] CancellationToken getToken() const noexcept;
 
-        void requestStop() noexcept;
+        void requestStop() const noexcept;
 
         [[nodiscard]] bool isStopped() const noexcept;
 

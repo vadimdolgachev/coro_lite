@@ -7,6 +7,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <coroutine>
+#include <deque>
 #include <exception>
 #include <mutex>
 #include <ranges>
@@ -23,30 +24,30 @@
 
 #include "CancellationToken.h"
 #include "CompletionSignal.h"
-#include "Timer.h"
+#include "FdRegistry.h"
+#include "TimerPool.h"
 
 namespace CoroLite {
     class EpollScheduler final {
-        struct CoroEntry final {
-            uint32_t events{};
-            std::coroutine_handle<> handle;
-        };
+        friend class Socket;
+        friend struct TimerAwaiter;
 
         class ThreadPool final {
             EpollScheduler &scheduler;
             std::mutex queueMutex;
             std::condition_variable_any cv;
-            std::vector<std::coroutine_handle<> > queue;
+            std::condition_variable idleCv;
+            std::deque<std::coroutine_handle<>> queue;
             std::vector<std::jthread> workers;
             bool stopping = false;
+            size_t activeWorkers = 0;
+            bool waitingForIdle = false;
 
         public:
             void enqueue(std::coroutine_handle<> h);
-
             void worker(const std::stop_token &st);
-
             void drainAndStop();
-
+            void waitIdle();
             ThreadPool(EpollScheduler &scheduler_, size_t numThreads);
         };
 
@@ -59,59 +60,47 @@ namespace CoroLite {
         static constexpr PollEvents PollRdHUp = EPOLLRDHUP;
 
         explicit EpollScheduler(const CancellationTokenSource &cts_);
-
+        // May wait for run() on another thread; destruction from a worker is forbidden.
         ~EpollScheduler();
-
         EpollScheduler(const EpollScheduler &) = delete;
-
         EpollScheduler &operator=(const EpollScheduler &) = delete;
 
-        void add(uint32_t events, int fd, std::coroutine_handle<> coro);
-
-        void remove(int fd, std::coroutine_handle<> coro);
-
-        void rollbackAdd(int fd, std::coroutine_handle<> coro) noexcept;
-
-        void forceRemoveFd(int fd);
-
+        void add(uint32_t events, int fd, std::coroutine_handle<> coro) const;
+        void addAwaiter(uint32_t events, int fd, std::coroutine_handle<> coro, std::optional<int> cancellationFd) const;
+        void remove(int fd, std::coroutine_handle<> coro) const;
+        void rollbackAdd(int fd, std::coroutine_handle<> coro) const noexcept;
+        void forceRemoveFd(int fd) const noexcept;
         void run();
-
         void registerDetached(std::coroutine_handle<> coro);
-
         void unregisterDetached(std::coroutine_handle<> coro) noexcept;
-
+        void beginDetachedStart();
+        void endDetachedStart() noexcept;
         [[nodiscard]] const CancellationTokenSource &getCancellationTokenSource() const;
 
     private:
-        struct FdState {
-            std::vector<CoroEntry> coros;
-        };
-
-        using FdStates = std::unordered_map<int, FdState>;
-
-        static uint32_t calculateRemainingEvents(const std::vector<CoroEntry> &coros);
-
-        void applyEpollRegistration(int fd, const std::vector<CoroEntry> &coros) const;
-
-        void collectReadyCoroutines(FdStates::iterator fdIt, uint32_t occurredEvents);
-
-        void enqueuePendingResumes();
-
+        void collectReadyCoroutines(FdRegistry::States::iterator fdIt, uint32_t occurredEvents);
+        void enqueuePendingResumes() const;
         void shutdown() noexcept;
-
         void onResumeFinished(void *address);
 
-        const UniqueFd epollFd;
+        std::shared_ptr<FdRegistry> registrations = std::make_shared<FdRegistry>();
         CompletionSignal wakeupSignal;
-        std::mutex schedulerMutex;
-        FdStates fdStates;
-        std::vector<std::coroutine_handle<> > pendingResumes;
+        std::shared_ptr<TimerPool> timers = std::make_shared<TimerPool>();
+        std::vector<std::coroutine_handle<>> pendingResumes;
         std::unordered_set<void *> scheduledCoros;
+        std::unordered_set<void *> deferredResumes;
         std::mutex detachedMutex;
-        std::vector<std::coroutine_handle<> > detachedCoros;
+        std::vector<std::coroutine_handle<>> detachedCoros;
+        std::mutex lifecycleMutex;
+        std::condition_variable lifecycleCv;
+        size_t detachedStartCount = 0;
+        bool runStarted = false;
+        bool runActive = false;
+        bool cleanupComplete = false;
+        std::thread::id runThread;
+        std::atomic_bool stopping = false;
+        CancellationTokenSource cts;
         std::unique_ptr<ThreadPool> threadPool;
-        const CancellationTokenSource &cts;
-        std::atomic_bool shutdownComplete = false;
     };
 
     template<typename T>
@@ -129,41 +118,14 @@ namespace CoroLite {
     };
 
     struct TimerAwaiter final : SchedulerAware<EpollScheduler> {
-        explicit TimerAwaiter(const std::chrono::nanoseconds delay_, CancellationTokenOpt ct) : delay(delay_),
-            cancellationToken(std::move(ct)) {
-        }
-
-        [[nodiscard]] bool await_ready() const noexcept {
-            return delay.count() == 0;
-        }
-
-        void await_suspend(const std::coroutine_handle<> h) {
-            handle = h;
-            if (cancellationToken) {
-                this->getScheduler()->add(EpollScheduler::PollIn, cancellationToken.value().getFd(), h);
-            }
-            timer.arm(delay);
-            this->getScheduler()->add(EpollScheduler::PollIn, timer.getFd(), h);
-        }
-
-        void await_resume() {
-            timer.drain();
-            this->getScheduler()->remove(timer.getFd(), handle);
-
-            if (cancellationToken) {
-                if (handle) {
-                    this->getScheduler()->remove(cancellationToken.value().getFd(), handle);
-                }
-                if (cancellationToken.value().isStopped()) {
-                    cancellationToken->drain();
-                    throw CancellationTokenException{};
-                }
-            }
-        }
+        explicit TimerAwaiter(std::chrono::nanoseconds delay_, CancellationTokenOpt ct);
+        [[nodiscard]] bool await_ready() const noexcept;
+        void await_suspend(std::coroutine_handle<> h);
+        void await_resume();
 
     private:
         std::chrono::nanoseconds delay;
-        Timer timer;
+        TimerLease timer;
         CancellationTokenOpt cancellationToken;
         std::coroutine_handle<> handle;
     };
@@ -178,7 +140,7 @@ namespace CoroLite {
 
     template<typename PromiseType>
     struct PromiseFinalAwaiter final {
-        static constexpr bool await_ready() noexcept {
+        [[nodiscard]] constexpr bool await_ready() const noexcept {
             return false;
         }
 
@@ -202,11 +164,11 @@ namespace CoroLite {
 
     template<typename PromiseType>
     struct PromiseBase : SchedulerAware<EpollScheduler> {
-        auto initial_suspend() noexcept {
+        auto initial_suspend() const noexcept {
             return std::suspend_always{};
         }
 
-        auto final_suspend() noexcept {
+        auto final_suspend() const noexcept {
             return PromiseFinalAwaiter<PromiseType>{};
         }
 
@@ -228,7 +190,7 @@ namespace CoroLite {
 
     template<typename PromiseType>
     struct PromiseVoid : PromiseBase<PromiseType> {
-        void return_void() noexcept {
+        void return_void() const noexcept {
         }
     };
 
@@ -272,8 +234,8 @@ namespace CoroLite {
     class CoroTask final {
     public:
         template<typename PromiseType>
-        using PromiseBase = std::conditional_t<std::is_void_v<T>, PromiseVoid<PromiseType>, PromiseValue<T,
-            PromiseType> >;
+        using PromiseBase =
+                std::conditional_t<std::is_void_v<T>, PromiseVoid<PromiseType>, PromiseValue<T, PromiseType>>;
 
         struct promise_type final : PromiseBase<promise_type> {
             CoroTask get_return_object() {
@@ -282,7 +244,8 @@ namespace CoroLite {
         };
 
         struct CoroTaskAwaiter final {
-            explicit CoroTaskAwaiter(CoroTask &&task_) noexcept : task(std::move(task_)) {
+            explicit CoroTaskAwaiter(CoroTask &&task_) noexcept :
+                task(std::move(task_)) {
             }
 
             CoroTaskAwaiter(CoroTaskAwaiter &) = delete;
@@ -310,10 +273,12 @@ namespace CoroLite {
             CoroTask task;
         };
 
-        explicit CoroTask(const std::coroutine_handle<promise_type> h) : handle(h) {
+        explicit CoroTask(const std::coroutine_handle<promise_type> h) :
+            handle(h) {
         }
 
-        CoroTask(CoroTask &&other) noexcept : handle(std::exchange(other.handle, nullptr)) {
+        CoroTask(CoroTask &&other) noexcept :
+            handle(std::exchange(other.handle, nullptr)) {
         }
 
         CoroTask &operator=(CoroTask &&other) noexcept = delete;
@@ -345,6 +310,13 @@ namespace CoroLite {
         }
 
         void startDetached(EpollScheduler &scheduler) {
+            scheduler.beginDetachedStart();
+            struct StartGuard final {
+                EpollScheduler &owner;
+                ~StartGuard() {
+                    owner.endDetachedStart();
+                }
+            } guard{scheduler};
             transition(CoroLifecycle::Created, CoroLifecycle::Detached, "startDetached");
             handle.promise().setScheduler(&scheduler);
             const auto coro = std::exchange(handle, nullptr);

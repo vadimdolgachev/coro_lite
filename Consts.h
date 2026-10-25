@@ -8,6 +8,7 @@ namespace CoroLite::Consts {
     constexpr size_t EPOLL_TIMEOUT_MS = 5'000;
     constexpr long long NANOSECONDS_PER_SECOND = 1'000'000'000LL;
     constexpr size_t THREAD_POOL_SIZE = 4;
+    constexpr size_t MAX_CACHED_TIMERS = 64;
 }
 
 #endif // CORO_LITE_CONSTS_H

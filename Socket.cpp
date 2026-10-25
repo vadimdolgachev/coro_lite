@@ -13,54 +13,66 @@
 #include <sys/socket.h>
 
 #include "Socket.h"
-#include "Logger.h"
 
 namespace {
-    void registerAwaiter(CoroLite::EpollScheduler &scheduler,
+    void registerAwaiter(const CoroLite::EpollScheduler &scheduler,
                          const int socketFd,
                          const uint32_t socketEvents,
                          const std::coroutine_handle<> handle,
-                         const std::optional<int> cancellationFd) {
-        if (cancellationFd) {
-            scheduler.add(CoroLite::EpollScheduler::PollIn, *cancellationFd, handle);
-        }
+                         const CoroLite::CancellationToken *const token) {
+        const auto cancellationFd = token ? std::optional{token->getFd()} : std::nullopt;
         try {
-            scheduler.add(socketEvents, socketFd, handle);
+            scheduler.addAwaiter(socketEvents, socketFd, handle, cancellationFd);
         } catch (...) {
-            if (cancellationFd) {
-                scheduler.rollbackAdd(*cancellationFd, handle);
+            if (token && token->isStopped()) {
+                throw CoroLite::CancellationTokenException{};
             }
             throw;
         }
     }
-}
+} // namespace
 
 namespace CoroLite {
-    Socket::Socket() : fd_(socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0)) {
+    Socket::Socket() :
+        fd_(socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0)) {
     }
 
-    Socket::Socket(const int fd) : fd_(fd) {
+    Socket::Socket(const int fd) :
+        fd_(fd) {
     }
 
     Socket::~Socket() {
         close();
     }
 
-    void Socket::setReusePort(const bool reusePort) {
+    void Socket::setReusePort(const bool reusePort) const {
         const int reuse = reusePort ? 1 : 0;
         if (setsockopt(fd_.get(), SOL_SOCKET, SO_REUSEPORT, &reuse, sizeof(reuse)) < 0) {
             throw std::system_error(errno, std::system_category(), "socket port reuse failed");
         }
     }
 
-    void Socket::setReuseAddr(const bool reuseAddr) {
+    void Socket::setReuseAddr(const bool reuseAddr) const {
         const int reuse = reuseAddr ? 1 : 0;
         if (setsockopt(fd_.get(), SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) < 0) {
             throw std::system_error(errno, std::system_category(), "SO_REUSEADDR failed");
         }
     }
 
+    void Socket::setScheduler(const EpollScheduler *const scheduler) const noexcept {
+        std::lock_guard lock(registryMutex);
+        registry = scheduler->registrations;
+    }
+
     void Socket::close() noexcept {
+        std::shared_ptr<FdRegistry> context;
+        {
+            std::lock_guard lock(registryMutex);
+            context = registry.lock();
+        }
+        if (context && fd_.get() >= 0) {
+            context->forceRemoveFd(fd_.get());
+        }
         fd_.reset(-1);
     }
 
@@ -83,7 +95,7 @@ namespace CoroLite {
 
     ListenSocketAwaiter Socket::listen(CancellationToken ct) const {
         ::listen(fd_.get(), SOMAXCONN);
-        return {fd_.get(), std::move(ct)};
+        return {*this, std::move(ct)};
     }
 
     bool Socket::isEof() const noexcept {
@@ -91,47 +103,49 @@ namespace CoroLite {
             return true;
         }
         unsigned char tmp;
-        const ssize_t result = recv(fd(), &tmp, 1, MSG_PEEK | MSG_DONTWAIT);
-        if (result == 0) {
-            return true;
-        }
-        if (result < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                return false;
-            }
-            return true;
-        }
-        return false;
+        ssize_t result;
+        do {
+            result = recv(fd(), &tmp, 1, MSG_PEEK | MSG_DONTWAIT);
+        } while (result < 0 && errno == EINTR);
+        return result == 0 || (result < 0 && errno != EAGAIN && errno != EWOULDBLOCK);
     }
 
-    ListenSocketAwaiter::ListenSocketAwaiter(const int fd_,
-                                             CancellationToken cancellationToken_) : fd(fd_),
+    ListenSocketAwaiter::ListenSocketAwaiter(const int fd_, CancellationToken cancellationToken_) :
+        fd(fd_),
         cancellationToken(std::move(cancellationToken_)) {
         if (fd_ == -1) {
             throw std::runtime_error("Invalid socket descriptor");
         }
     }
 
-    bool ListenSocketAwaiter::await_ready() const noexcept {
+    ListenSocketAwaiter::ListenSocketAwaiter(const Socket &socket_, CancellationToken cancellationToken_) :
+        ListenSocketAwaiter(socket_.fd(), std::move(cancellationToken_)) {
+        owner = &socket_;
+    }
+
+    bool ListenSocketAwaiter::await_ready() noexcept {
         return false;
     }
 
     void ListenSocketAwaiter::await_suspend(const std::coroutine_handle<> h) {
+        if (owner) {
+            owner->setScheduler(getScheduler());
+        }
         assert(getScheduler() != nullptr);
         if (cancellationToken.isStopped()) {
             throw CancellationTokenException{};
         }
         handle = h;
-        registerAwaiter(*getScheduler(), fd, EpollScheduler::PollIn, h, cancellationToken.getFd());
+        registerAwaiter(*getScheduler(), fd, EpollScheduler::PollIn, h, &cancellationToken);
     }
 
-    AcceptedSocket ListenSocketAwaiter::await_resume() {
+    AcceptedSocket ListenSocketAwaiter::await_resume() const {
         if (handle) {
             getScheduler()->remove(cancellationToken.getFd(), handle);
         }
         if (cancellationToken.isStopped()) {
             cancellationToken.drain();
-            getScheduler()->forceRemoveFd(fd);
+            getScheduler()->remove(fd, handle);
             throw CancellationTokenException{};
         }
         sockaddr_storage addr{};
@@ -141,13 +155,11 @@ namespace CoroLite {
             if (errno == EAGAIN || errno == EINTR) {
                 if (cancellationToken.isStopped()) {
                     cancellationToken.drain();
-                    getScheduler()->forceRemoveFd(fd);
+                    getScheduler()->remove(fd, handle);
                     throw CancellationTokenException{};
                 }
             }
-            throw std::system_error(errno,
-                                    std::system_category(),
-                                    "accept4 failed");
+            throw std::system_error(errno, std::system_category(), "accept4 failed");
         }
 
         if (addr.ss_family == AF_INET6) {
@@ -162,20 +174,46 @@ namespace CoroLite {
         return {std::make_shared<Socket>(socketFd), Endpoint(addr4)};
     }
 
-    ReadSocketAwaiter Socket::read(std::span<unsigned char> buffer, CancellationTokenOpt ct) {
+    namespace {
+        template<typename Awaiter>
+        CoroTask<size_t> transfer(SocketPtr socket, const std::span<unsigned char> buffer, CancellationTokenOpt ct) {
+            while (true) {
+                if (ct && ct->isStopped()) {
+                    throw CancellationTokenException{};
+                }
+                try {
+                    co_return co_await Awaiter{socket, buffer, ct ? CancellationTokenOpt{ct->clone()} : std::nullopt};
+                } catch (const std::system_error &error) {
+                    const int value = error.code().value();
+                    if (value == EAGAIN) {
+                        continue;
+                    }
+#if EWOULDBLOCK != EAGAIN
+                    if (value == EWOULDBLOCK) {
+                        continue;
+                    }
+#endif
+                    throw;
+                }
+            }
+        }
+    } // namespace
+
+    CoroTask<size_t> Socket::read(const std::span<unsigned char> buffer, CancellationTokenOpt ct) {
         if (buffer.empty()) {
             throw std::runtime_error("Buffer is empty");
         }
-        return {shared_from_this(), buffer, std::move(ct)};
+        return transfer<ReadSocketAwaiter>(shared_from_this(), buffer, std::move(ct));
     }
 
-    WriteSocketAwaiter Socket::write(std::span<unsigned char> buffer, CancellationTokenOpt ct) {
-        return {shared_from_this(), buffer, std::move(ct)};
+    CoroTask<size_t> Socket::write(const std::span<unsigned char> buffer, CancellationTokenOpt ct) {
+        return transfer<WriteSocketAwaiter>(shared_from_this(), buffer, std::move(ct));
     }
 
     ReadSocketAwaiter::ReadSocketAwaiter(SocketPtr socket_,
                                          const std::span<unsigned char> buffer_,
-                                         CancellationTokenOpt cancellationToken_) : socket(std::move(socket_)),
+                                         CancellationTokenOpt cancellationToken_) :
+        socket(std::move(socket_)),
         buffer(buffer_),
         cancellationToken(std::move(cancellationToken_)) {
         if (!socket || socket->fd() == -1) {
@@ -213,16 +251,12 @@ namespace CoroLite {
     void ReadSocketAwaiter::await_suspend(const std::coroutine_handle<> h) {
         handle = h;
         assert(getScheduler() != nullptr);
-        if (cancellationToken) {
-            if (cancellationToken->isStopped()) {
-                getScheduler()->forceRemoveFd(socket->fd());
-                throw CancellationTokenException{};
-            }
+        socket->setScheduler(getScheduler());
+        if (cancellationToken && cancellationToken->isStopped()) {
+            throw CancellationTokenException{};
         }
-        const std::optional<int> cancellationFd = cancellationToken
-                                                      ? std::optional{cancellationToken->getFd()}
-                                                      : std::nullopt;
-        registerAwaiter(*getScheduler(), socket->fd(), EpollScheduler::PollIn, h, cancellationFd);
+        const auto *const token = cancellationToken ? &cancellationToken.value() : nullptr;
+        registerAwaiter(*getScheduler(), socket->fd(), EpollScheduler::PollIn, h, token);
     }
 
     size_t ReadSocketAwaiter::await_resume() {
@@ -232,7 +266,9 @@ namespace CoroLite {
             }
             if (cancellationToken.value().isStopped()) {
                 cancellationToken->drain();
-                getScheduler()->forceRemoveFd(socket->fd());
+                if (handle) {
+                    getScheduler()->remove(socket->fd(), handle);
+                }
                 throw CancellationTokenException{};
             }
         }
@@ -245,22 +281,24 @@ namespace CoroLite {
 
         while (true) {
             const ssize_t bytesRead = recv(socket->fd(), buffer.data(), buffer.size(), 0);
-            if (bytesRead < 0) {
-                log_d("ReadSocketAwaiter::await_resume bytesRead={}, errno={}\n", bytesRead, errno);
-                if (errno == EAGAIN || errno == EINTR) {
-                }
-                if (errno == EINTR) {
-                    continue;
-                }
-                throw std::system_error(errno, std::system_category(), "recv failed");
+            if (bytesRead >= 0) {
+                return static_cast<size_t>(bytesRead);
             }
-            return static_cast<size_t>(bytesRead);
+            if (errno == EINTR) {
+                continue;
+            }
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                // Socket::read retries this result by awaiting readiness again.
+                throw std::system_error(errno, std::system_category(), "recv would block");
+            }
+            throw std::system_error(errno, std::system_category(), "recv failed");
         }
     }
 
     WriteSocketAwaiter::WriteSocketAwaiter(SocketPtr socket_,
                                            const std::span<unsigned char> buffer_,
-                                           CancellationTokenOpt cancellationToken_) : socket(std::move(socket_)),
+                                           CancellationTokenOpt cancellationToken_) :
+        socket(std::move(socket_)),
         buffer(buffer_),
         cancellationToken(std::move(cancellationToken_)) {
     }
@@ -296,26 +334,26 @@ namespace CoroLite {
     void WriteSocketAwaiter::await_suspend(const std::coroutine_handle<> h) {
         handle = h;
         assert(getScheduler() != nullptr);
+        socket->setScheduler(getScheduler());
         if (cancellationToken) {
             if (cancellationToken->isStopped()) {
-                getScheduler()->forceRemoveFd(socket->fd());
                 throw CancellationTokenException{};
             }
         }
-        const std::optional<int> cancellationFd = cancellationToken
-                                                      ? std::optional{cancellationToken->getFd()}
-                                                      : std::nullopt;
-        registerAwaiter(*getScheduler(), socket->fd(), EpollScheduler::PollOut, h, cancellationFd);
+        const auto *const token = cancellationToken ? &*cancellationToken : nullptr;
+        registerAwaiter(*getScheduler(), socket->fd(), EpollScheduler::PollOut, h, token);
     }
 
-    size_t WriteSocketAwaiter::await_resume() {
+    size_t WriteSocketAwaiter::await_resume() const {
         if (cancellationToken) {
             if (handle) {
                 getScheduler()->remove(cancellationToken.value().getFd(), handle);
             }
             if (cancellationToken.value().isStopped()) {
                 cancellationToken->drain();
-                getScheduler()->forceRemoveFd(socket->fd());
+                if (handle) {
+                    getScheduler()->remove(socket->fd(), handle);
+                }
                 throw CancellationTokenException{};
             }
         }
@@ -348,7 +386,8 @@ namespace CoroLite {
 
     ConnectSocketAwaiter::ConnectSocketAwaiter(SocketPtr socket_,
                                                Endpoint endpoint_,
-                                               CancellationTokenOpt cancellationToken_) : socket(std::move(socket_)),
+                                               CancellationTokenOpt cancellationToken_) :
+        socket(std::move(socket_)),
         endpoint(std::move(endpoint_)),
         cancellationToken(std::move(cancellationToken_)) {
         if (!socket || socket->fd() == -1) {
@@ -395,30 +434,26 @@ namespace CoroLite {
     void ConnectSocketAwaiter::await_suspend(const std::coroutine_handle<> h) {
         handle = h;
         assert(getScheduler() != nullptr);
+        socket->setScheduler(getScheduler());
         if (cancellationToken) {
             if (cancellationToken->isStopped()) {
-                getScheduler()->forceRemoveFd(socket->fd());
                 throw CancellationTokenException{};
             }
         }
-        const std::optional<int> cancellationFd = cancellationToken
-                                                      ? std::optional{cancellationToken->getFd()}
-                                                      : std::nullopt;
-        registerAwaiter(*getScheduler(),
-                        socket->fd(),
-                        EpollScheduler::PollOut | EpollScheduler::PollErr,
-                        h,
-                        cancellationFd);
+        const auto *const token = cancellationToken ? &*cancellationToken : nullptr;
+        registerAwaiter(*getScheduler(), socket->fd(), EpollScheduler::PollOut | EpollScheduler::PollErr, h, token);
     }
 
-    void ConnectSocketAwaiter::await_resume() {
+    void ConnectSocketAwaiter::await_resume() const {
         if (cancellationToken) {
             if (handle) {
                 getScheduler()->remove(cancellationToken.value().getFd(), handle);
             }
             if (cancellationToken.value().isStopped()) {
                 cancellationToken->drain();
-                getScheduler()->forceRemoveFd(socket->fd());
+                if (handle) {
+                    getScheduler()->remove(socket->fd(), handle);
+                }
                 throw CancellationTokenException{};
             }
         }
